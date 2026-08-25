@@ -783,10 +783,28 @@ def test_merge_failure_is_not_misreported_as_a_conflict():
         run(alice, "add", os.path.join(EXAMPLES, "meeting-notes"),
             "--owner", "founder")
         run(bob, "init")
+        # Force bob's root commit to differ from alice's. Both registries are
+        # created the same way, and registry.json stamps `created` only to the
+        # second, so on a fast machine the two inits produce byte-identical
+        # root commits with the same sha -- which makes the histories related
+        # and the merge succeed. Amending the message guarantees the unrelated
+        # history this test is about, on any machine, at any speed.
+        subprocess.run(["git", "-C", bob,
+                        "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        "commit", "--amend", "-m", "bob's own registry root",
+                        "--quiet"], capture_output=True)
         run(bob, "add", os.path.join(EXAMPLES, "deadline-pinger"),
             "--owner", "founder")
         subprocess.run(["git", "-C", bob, "remote", "add", "origin", alice],
                        capture_output=True)
+
+        roots = []
+        for repo in (alice, bob):
+            r = subprocess.run(["git", "-C", repo, "rev-list", "--max-parents=0",
+                                "HEAD"], capture_output=True, text=True)
+            roots.append(r.stdout.strip())
+        check(roots[0] != roots[1] and all(roots),
+              "the two registries really do have unrelated roots")
 
         code, txt = run(bob, "pull")
         check(code == 1, "merge of unrelated histories fails")
