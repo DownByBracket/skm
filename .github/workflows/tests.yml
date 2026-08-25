@@ -19,11 +19,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Identify git (registries are git backed)
+      # Deliberately NOT configuring git user.name, user.email or
+      # init.defaultBranch. A runner with no git identity is exactly the
+      # environment a new contributor has, and configuring it here once hid a
+      # real bug: `git merge` needs an identity too, so reconcile worked on
+      # developer laptops and failed everywhere else. Leave this clean so the
+      # build keeps standing in for an unconfigured machine.
+      - name: Confirm the runner has no ambient git identity
         run: |
-          git config --global user.email "skm@localhost"
-          git config --global user.name "skm"
-          git config --global init.defaultBranch main
+          echo "user.email: $(git config --global --get user.email || echo unset)"
+          echo "defaultBranch: $(git config --global --get init.defaultBranch || echo unset)"
 
       - name: Unit tests
         run: python test_skm.py
@@ -54,3 +59,60 @@ jobs:
 
       - name: Registry verifies clean
         run: python skm.py verify --registry /tmp/reg
+
+  # A permanent guard against "works on the author's machine". This leg runs
+  # the suite with no HOME and no git config of any kind, which is the state a
+  # new contributor, a container, and a fresh runner are all in. A tool whose
+  # pitch is trust cannot afford a green badge that depends on the author
+  # having configured git years ago.
+  clean-env:
+    name: scrubbed environment (no git identity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Prove the environment really is scrubbed
+        run: |
+          mkdir -p "$RUNNER_TEMP/nohome"
+          env HOME="$RUNNER_TEMP/nohome" \
+              GIT_CONFIG_GLOBAL="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_SYSTEM="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_NOSYSTEM=1 \
+            sh -c 'if git config --get user.email; then
+                     echo "::error::environment is not scrubbed"; exit 1
+                   fi
+                   echo "no git identity, as intended"'
+
+      - name: Unit tests with no git identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/nohome"
+          env HOME="$RUNNER_TEMP/nohome" \
+              GIT_CONFIG_GLOBAL="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_SYSTEM="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_NOSYSTEM=1 \
+            python test_skm.py
+
+      - name: A shared registry round trip with no git identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/nohome"
+          env HOME="$RUNNER_TEMP/nohome" \
+              GIT_CONFIG_GLOBAL="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_SYSTEM="$RUNNER_TEMP/nohome/absent" \
+              GIT_CONFIG_NOSYSTEM=1 \
+            sh -c '
+              set -e
+              python skm.py init --registry "$RUNNER_TEMP/alice"
+              python skm.py add examples/meeting-notes --owner founder \
+                --registry "$RUNNER_TEMP/alice"
+              git clone --quiet "$RUNNER_TEMP/alice" "$RUNNER_TEMP/bob"
+              python skm.py add examples/deadline-pinger --owner founder \
+                --registry "$RUNNER_TEMP/alice"
+              python skm.py add examples/shady-helper \
+                --registry "$RUNNER_TEMP/bob"
+              python skm.py pull --registry "$RUNNER_TEMP/bob"
+              python skm.py verify --registry "$RUNNER_TEMP/bob"
+            '

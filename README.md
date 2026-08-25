@@ -196,6 +196,13 @@ Two guarantees make this safe to share:
   one check that matters.
 - **Push refuses a dirty registry.** Every skm command commits its own
   work, so uncommitted changes mean someone edited the registry by hand.
+- **No git setup required.** skm supplies its own identity to every git
+  operation it performs, including merges, and pins each registry to the
+  `main` branch rather than inheriting whatever `init.defaultBranch` the
+  machine happens to use. A brand new laptop with no `user.email` and no
+  `~/.gitconfig` can init, push, pull and reconcile a shared registry. CI
+  runs the whole suite in exactly that scrubbed state so this keeps being
+  true.
 
 ## Who is allowed to promote
 

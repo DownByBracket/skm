@@ -26,6 +26,14 @@ REGISTRY_FILE = "registry.json"
 
 SEVERITY_ORDER = ["critical", "high", "medium", "low"]
 
+DEFAULT_BRANCH = "main"
+
+# Every git invocation that might create a commit carries its own identity.
+# Depending on the user's global user.name/user.email means skm works on a
+# configured laptop and fails on a fresh machine, a container, or CI -- and
+# `git merge` needs an identity just as much as `git commit` does.
+GIT_IDENTITY = ["-c", "user.name=skm", "-c", "user.email=skm@localhost"]
+
 
 def now_utc():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -126,8 +134,8 @@ def git_commit(root, msg, sign=False):
         if sign:
             raise RuntimeError(f"{root} is not a git repo; cannot sign")
         return None
-    cmd = ["git", "-C", root, "-c", "user.name=skm",
-           "-c", "user.email=skm@localhost", "commit", "-m", msg, "--quiet"]
+    cmd = ["git", "-C", root] + GIT_IDENTITY + ["commit", "-m", msg,
+                                                "--quiet"]
     if sign:
         cmd.append("-S")
     try:
@@ -430,8 +438,19 @@ def cmd_init(args):
     if not args.no_git and shutil.which("git") and \
             not os.path.isdir(os.path.join(root, ".git")):
         try:
-            subprocess.run(["git", "-C", root, "init", "--quiet"],
-                           check=True, capture_output=True)
+            # Pin the branch: init.defaultBranch varies by machine, and a
+            # registry whose branch name depends on who created it cannot be
+            # pushed and pulled reliably by everyone else.
+            made = subprocess.run(["git", "-C", root, "init", "--quiet",
+                                   "-b", DEFAULT_BRANCH],
+                                  capture_output=True)
+            if made.returncode != 0:
+                # git < 2.28 has no -b
+                subprocess.run(["git", "-C", root, "init", "--quiet"],
+                               check=True, capture_output=True)
+                subprocess.run(["git", "-C", root, "symbolic-ref", "HEAD",
+                                "refs/heads/" + DEFAULT_BRANCH],
+                               check=True, capture_output=True)
             git_commit(root, "skm: init registry")
         except subprocess.CalledProcessError:
             pass
@@ -1086,7 +1105,7 @@ def cmd_verify(args):
 
 def git_out(root, *args):
     """Run a git command, returning (returncode, stdout, stderr)."""
-    r = subprocess.run(["git", "-C", root] + list(args),
+    r = subprocess.run(["git", "-C", root] + GIT_IDENTITY + list(args),
                        capture_output=True, text=True)
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
@@ -1259,6 +1278,31 @@ def normalize_remote_url(url):
     return url
 
 
+def align_remote_head(url, branch):
+    """Point a local bare remote's HEAD at the branch we just pushed.
+
+    `git init --bare` takes HEAD from whatever init.defaultBranch happens to
+    be on the machine that ran it. If that is `master` and the registry lives
+    on `main`, every `git clone` of the remote checks out a branch that does
+    not exist and hands the user an empty directory -- with no error, which is
+    the worst way for this to fail. Hosted remotes pick their default from the
+    first push, so this only concerns local paths.
+
+    Returns True only when HEAD was actually repointed.
+    """
+    if not os.path.isdir(url):
+        return False
+    # Leave a remote alone if its HEAD already resolves: that means it is a
+    # working repo or an already-populated bare one, not a fresh mismatch.
+    if git_out(url, "rev-parse", "--verify", "--quiet", "HEAD")[0] == 0:
+        return False
+    if git_out(url, "rev-parse", "--verify", "--quiet",
+               "refs/heads/" + branch)[0] != 0:
+        return False
+    return git_out(url, "symbolic-ref", "HEAD",
+                   "refs/heads/" + branch)[0] == 0
+
+
 def cmd_push(args):
     """Publish the registry so other people can pull it."""
     root = os.path.abspath(args.registry)
@@ -1297,6 +1341,9 @@ def cmd_push(args):
             print("  the remote has commits you do not: run skm pull first")
         sys.exit(1)
     print(f"pushed {branch} to {url}")
+    if align_remote_head(url, branch):
+        print(f"  pointed the remote's HEAD at {branch}, so clones of it are "
+              f"not empty")
 
 
 def cmd_pull(args):
@@ -1336,6 +1383,16 @@ def cmd_pull(args):
 
     _, conflicts, _ = git_out(root, "diff", "--name-only", "--diff-filter=U")
     conflicted = [c for c in conflicts.splitlines() if c.strip()]
+    if not conflicted:
+        # The merge failed without conflicting on anything, so it failed for
+        # some other reason. Report what git actually said instead of
+        # guessing at a content conflict that did not happen.
+        git_out(root, "merge", "--abort")
+        print("error: merge failed, and not because of a content conflict:")
+        for line in (err or out).splitlines():
+            print("  " + line)
+        print("  the merge was aborted; nothing changed")
+        sys.exit(1)
     if conflicted != [REGISTRY_FILE]:
         git_out(root, "merge", "--abort")
         print("error: the merge conflicts in files skm cannot reconcile:")

@@ -25,12 +25,33 @@ def check(cond, label):
         FAILED.append(label)
 
 
-def run(root, *args):
+def run(root, *args, **kwargs):
     # --registry is defined on each subparser, so it must follow the command
     r = subprocess.run([sys.executable, SKM] + list(args) +
                        ["--registry", root],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       env=kwargs.get("env"))
     return r.returncode, r.stdout + r.stderr
+
+
+def bare_git_env(tmp):
+    """An environment with no global or system git config at all.
+
+    A developer laptop almost always has user.name and user.email set, which
+    hides any code path that relies on them. Fresh machines, containers and CI
+    runners do not, so the tests have to be able to stand in for one.
+    """
+    empty = os.path.join(tmp, "empty-gitconfig")
+    with open(empty, "w", encoding="utf-8"):
+        pass
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = empty
+    env["GIT_CONFIG_SYSTEM"] = empty
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
+        env.pop(var, None)
+    return env
 
 
 def rules_hit(path):
@@ -694,6 +715,98 @@ def test_registry_disables_git_text_conversion():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_reconcile_without_any_git_identity():
+    """skm must not depend on the user's global git config.
+
+    `git merge` needs a committer identity just as much as `git commit` does.
+    skm supplies one to its own commits, so this went unnoticed on machines
+    that happen to have git configured -- and failed on every machine that
+    does not.
+    """
+    print("reconcile with no git identity")
+    root = tempfile.mkdtemp()
+    try:
+        env = bare_git_env(root)
+        alice = os.path.join(root, "alice")
+        bob = os.path.join(root, "bob")
+
+        code, txt = run(alice, "init", env=env)
+        check(code == 0, "registry initializes with no git identity")
+
+        branch = subprocess.run(["git", "-C", alice, "rev-parse",
+                                 "--abbrev-ref", "HEAD"],
+                                capture_output=True, text=True, env=env)
+        check(branch.stdout.strip() == "main",
+              "registry branch is pinned, not inherited from the machine")
+
+        run(alice, "add", os.path.join(EXAMPLES, "meeting-notes"),
+            "--owner", "founder", env=env)
+        clone = subprocess.run(["git", "clone", "--quiet", alice, bob],
+                               capture_output=True, text=True, env=env)
+        check(clone.returncode == 0, "registry clones with no git identity")
+
+        # both sides move independently
+        run(alice, "add", os.path.join(EXAMPLES, "deadline-pinger"),
+            "--owner", "founder", env=env)
+        run(bob, "add", os.path.join(EXAMPLES, "shady-helper"), env=env)
+
+        code, txt = run(bob, "pull", env=env)
+        check(code == 0, "pull reconciles with no git identity configured")
+        check("reconciling by skill" in txt, "the manifest was reconciled")
+        check("deadline-pinger" in txt, "remote-only skill was taken")
+        check("shady-helper" in txt, "local-only skill was kept")
+        check(run(bob, "verify", env=env)[0] == 0,
+              "reconciled registry verifies clean")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_merge_failure_is_not_misreported_as_a_conflict():
+    """A merge that fails for a non-conflict reason must say so.
+
+    The old code assumed any failed merge was a content conflict, so it
+    printed an empty file list under a confident, fabricated explanation
+    ("the same skill was promoted differently on both sides"). In a security
+    tool a wrong explanation is worse than a crash: it teaches people to
+    distrust output that is usually right.
+
+    Two independently created registries have unrelated histories, so the
+    fetch succeeds and the *merge* is what fails, with nothing conflicted --
+    exactly the path that used to lie.
+    """
+    print("merge failure reporting")
+    root = tempfile.mkdtemp()
+    try:
+        alice = os.path.join(root, "alice")
+        bob = os.path.join(root, "bob")
+        run(alice, "init")
+        run(alice, "add", os.path.join(EXAMPLES, "meeting-notes"),
+            "--owner", "founder")
+        run(bob, "init")
+        run(bob, "add", os.path.join(EXAMPLES, "deadline-pinger"),
+            "--owner", "founder")
+        subprocess.run(["git", "-C", bob, "remote", "add", "origin", alice],
+                       capture_output=True)
+
+        code, txt = run(bob, "pull")
+        check(code == 1, "merge of unrelated histories fails")
+        check("promoted differently on both sides" not in txt,
+              "does not invent a promotion-conflict explanation")
+        check("not because of a content conflict" in txt,
+              "says the failure was not a content conflict")
+        check("unrelated histories" in txt.lower(),
+              "surfaces what git actually reported")
+
+        # and the failed pull must leave the registry untouched
+        check(run(bob, "verify")[0] == 0, "registry still verifies after the "
+                                          "failed merge")
+        _, listing = run(bob, "list")
+        check("deadline-pinger" in listing and "meeting-notes" not in listing,
+              "nothing was half-merged into the registry")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 for fn in (test_wrapped_prose_is_still_caught, test_clean_skill_stays_clean,
            test_sync_respects_gates, test_sync_is_committed,
            test_promotion_gates, test_eval_gate_requires_execution,
@@ -709,7 +822,9 @@ for fn in (test_wrapped_prose_is_still_caught, test_clean_skill_stays_clean,
            test_retract_removes_deliveries,
            test_retract_refuses_unsafe_paths,
            test_hash_is_portable_across_line_endings,
-           test_registry_disables_git_text_conversion):
+           test_registry_disables_git_text_conversion,
+           test_reconcile_without_any_git_identity,
+           test_merge_failure_is_not_misreported_as_a_conflict):
     fn()
 
 print()
