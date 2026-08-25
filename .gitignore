@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local skm data (each user keeps their own registry, never commit it)
+skm-registry/
+skills-sync/
+
+# OS noise
+.DS_Store
+Thumbs.db

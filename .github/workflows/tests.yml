@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Identify git (registries are git backed)
+        run: |
+          git config --global user.email "skm@localhost"
+          git config --global user.name "skm"
+          git config --global init.defaultBranch main
+
+      - name: Unit tests
+        run: python test_skm.py
+
+      # The scanner is the product; a green build must mean it still catches
+      # the malicious example, and still exits non-zero when it does.
+      - name: Scanner catches the malicious example
+        run: |
+          python skm.py init --registry /tmp/reg
+          python skm.py add examples/shady-helper --registry /tmp/reg
+          if python skm.py scan shady-helper --registry /tmp/reg; then
+            echo "::error::scan exited 0 on a skill with critical findings"
+            exit 1
+          fi
+
+      - name: Malicious skill cannot be promoted or synced
+        run: |
+          if python skm.py promote shady-helper --to team --registry /tmp/reg; then
+            echo "::error::promotion succeeded on a critical skill"
+            exit 1
+          fi
+          if python skm.py sync shady-helper --surface generic \
+               --dest /tmp/out --registry /tmp/reg; then
+            echo "::error::sync succeeded on a critical skill"
+            exit 1
+          fi
+          test ! -d /tmp/out/shady-helper
+
+      - name: Registry verifies clean
+        run: python skm.py verify --registry /tmp/reg

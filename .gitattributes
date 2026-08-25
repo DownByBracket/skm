@@ -1,0 +1,5 @@
+# This project is content sensitive: skm hashes skill folders, and the test
+# suite asserts those hashes are stable. Keep line endings identical on every
+# platform so a checkout on Windows and one on Linux are byte for byte the
+# same.
+* text=auto eol=lf
