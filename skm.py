@@ -357,7 +357,12 @@ def scan_skill(path):
         dirs.sort()
         for f in sorted(files):
             fp = os.path.join(base, f)
-            rel = os.path.relpath(fp, path)
+            # POSIX separators, like hash_tree: a finding's path is an
+            # identifier that lands in registry.json and in CI logs, so it
+            # must read the same on every platform. Native separators make a
+            # shared registry diff noisily between Windows and Linux, and
+            # make log output harder to grep.
+            rel = os.path.relpath(fp, path).replace(os.sep, "/")
             file_count += 1
             kind = classify_file(rel)
             if kind == "other":

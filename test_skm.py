@@ -825,6 +825,38 @@ def test_merge_failure_is_not_misreported_as_a_conflict():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_finding_paths_are_posix_on_every_platform():
+    """A finding's path is an identifier, not just display text.
+
+    It is written into registry.json, so native separators would make the
+    same skill produce different manifest content on Windows and on Linux --
+    noisy diffs in exactly the shared registries this tool is for -- and make
+    CI log output harder to grep.
+    """
+    print("posix finding paths")
+    scan = skm.scan_skill(os.path.join(EXAMPLES, "shady-helper"))
+    files = [f["file"] for f in scan["findings"]]
+    check(files, "the malicious example produces findings to check")
+    check(all("\\" not in f for f in files),
+          "no finding path contains a backslash")
+    check(any(f == "scripts/setup.sh" for f in files),
+          "the nested script is reported with forward slashes")
+
+    root = tempfile.mkdtemp()
+    try:
+        run(root, "init")
+        run(root, "add", os.path.join(EXAMPLES, "shady-helper"))
+        import json as _json
+        reg = _json.load(open(os.path.join(root, "registry.json"),
+                              encoding="utf-8"))
+        stored = [f["file"]
+                  for f in reg["skills"]["shady-helper"]["scan"]["findings"]]
+        check(all("\\" not in f for f in stored),
+              "stored manifest paths are portable too")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 for fn in (test_wrapped_prose_is_still_caught, test_clean_skill_stays_clean,
            test_sync_respects_gates, test_sync_is_committed,
            test_promotion_gates, test_eval_gate_requires_execution,
@@ -842,7 +874,8 @@ for fn in (test_wrapped_prose_is_still_caught, test_clean_skill_stays_clean,
            test_hash_is_portable_across_line_endings,
            test_registry_disables_git_text_conversion,
            test_reconcile_without_any_git_identity,
-           test_merge_failure_is_not_misreported_as_a_conflict):
+           test_merge_failure_is_not_misreported_as_a_conflict,
+           test_finding_paths_are_posix_on_every_platform):
     fn()
 
 print()
